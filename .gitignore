@@ -1,0 +1,27 @@
+config.py
+
+# Output
+test_output/
+*.jsonl
+pseudonymized_output/
+ollama_logs/
+
+# Journal files and variations
+*.txt
+!requirements.txt
+*.json
+*.log
+# Input
+Journal 2014 - 2:14:25.txt
+Journal first 1500.txt
+Journal first days.txt
+Journal first month.txt
+
+# Python stuff
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/

@@ -1,0 +1,6 @@
+numpy>=2.2.3
+transformers
+textblob
+vaderSentiment
+nltk
+anthropic 
