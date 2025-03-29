@@ -206,6 +206,7 @@ class ContextualPseudonymizer:
             return ""
 
     def detect_identifiers(self, text: str) -> Dict:
+        """Use Ollama API to detect identifiers in text"""
         try:
             print(f"Processing chunk of {len(text):,} chars")
             print("\nSample text:", text[:200], "...")
@@ -246,34 +247,38 @@ IMPORTANT:
 - Return items exactly as they appear in text
 - Do not include any explanatory text, ONLY the JSON object with the extracted data"""
 
-            print("Sending to Ollama...")
             try:
+                # Switch to API approach
                 response = self.ollama_client.generate(
                     model=self.model,
                     prompt=prompt
                 )
                 
-                # Collect streamed response with logging
-                full_response = ""
-                print("\nRaw response stream:")
-                print("-" * 60)
-                
-                for chunk in response:
-                    content = chunk['response']
-                    full_response += content
-                    print(content, end='', flush=True)
-                
-                print("\n" + "-" * 60)
-                
                 try:
                     # Clean the response to ensure we only parse the JSON
-                    json_start = full_response.find('{')
-                    json_end = full_response.rfind('}') + 1
+                    json_start = response['response'].find('{')
+                    json_end = response['response'].rfind('}') + 1
                     if json_start >= 0 and json_end > json_start:
-                        json_str = full_response[json_start:json_end]
+                        json_str = response['response'][json_start:json_end]
                         result = json.loads(json_str)
-                        print("\nRaw response from model:")
-                        print(result)  # Add this to see raw response
+                        
+                        # Process and display categories
+                        print("\nProcessing categories:")
+                        for category, subcategories in result.items():
+                            print(f"Category: {category}")
+                            print(f"Subcategories: {subcategories}")
+                            for subcategory, items in subcategories.items():
+                                print(f"  Subcategory: {subcategory}")
+                                print(f"  Items: {items}")
+                        
+                        # Log after all processing is complete
+                        log_dir = self.output_dir / "ollama_logs"
+                        log_dir.mkdir(exist_ok=True)
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        log_file = log_dir / f"ollama_response_{timestamp}.txt"
+                        with open(log_file, "w") as f:
+                            f.write(f"PROMPT:\n{prompt}\n\nRESPONSE:\n{response['response']}\n\nPROCESSED:\n{json.dumps(result, indent=2)}")
+                        
                         return result
                     else:
                         print("No valid JSON found in response")
@@ -281,31 +286,12 @@ IMPORTANT:
                     
                 except json.JSONDecodeError as e:
                     print(f"\nJSON parsing error: {str(e)}")
-                    print("Raw response:", full_response)
+                    print("Raw response:", response['response'])
                     return {}
                     
             except Exception as e:
                 print(f"Generation error: {e}")
                 return {}
-            
-            print("\nProcessing categories:")
-            for category, subcategories in result.items():
-                print(f"Category: {category}")
-                print(f"Subcategories: {subcategories}")
-                for subcategory, items in subcategories.items():
-                    print(f"  Subcategory: {subcategory}")
-                    print(f"  Items: {items}")
-            
-            # Get response and log it
-            response_text = self._run_ollama(prompt)
-            
-            # Add logging
-            log_dir = self.output_dir / "ollama_logs"
-            log_dir.mkdir(exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_file = log_dir / f"ollama_response_{timestamp}.txt"
-            with open(log_file, "w") as f:
-                f.write(f"PROMPT:\n{prompt}\n\nRESPONSE:\n{response_text}")
             
         except Exception as e:
             print(f"\nUnexpected error: {e}")
