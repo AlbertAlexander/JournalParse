@@ -4,6 +4,7 @@
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 
+
 # Simple relative path to .env
 source "$PROJECT_ROOT/.env"
 
@@ -81,13 +82,25 @@ if regions:
     
     # Copy and run setup
     echo "📦 Copying setup script..."
-    scp -i ~/.ssh/your_lambda_key setup_server.sh ubuntu@$INSTANCE_IP:~/
+    scp -i "$SSH_KEY_PATH" "$SCRIPT_DIR/setup_server.sh" ubuntu@$INSTANCE_IP:~/
     
     echo "🔧 Running setup script..."
-    ssh -i ~/.ssh/your_lambda_key ubuntu@$INSTANCE_IP './setup_server.sh'
+    ssh -i "$SSH_KEY_PATH" ubuntu@$INSTANCE_IP './setup_server.sh'
     
-    echo "🌟 Setup complete! Connect with:"
-    echo "ssh -i ~/.ssh/your_lambda_key ubuntu@$INSTANCE_IP"
+    echo "🌟 Setup complete!"
+    echo "🔌 Connecting with port forwarding..."
+    
+    # Note: -N means "don't execute remote command" (just forward ports)
+    #       -f means "go to background"
+    ssh -i "$SSH_KEY_PATH" -N -f -L 11434:localhost:11434 ubuntu@$INSTANCE_IP
+    
+    echo "✨ Ollama API available at localhost:11434"
+    echo ""
+    echo "To connect directly:"
+    echo "ssh -i $SSH_KEY_PATH ubuntu@$INSTANCE_IP"
+    echo ""
+    echo "To stop the instance:"
+    echo "./scripts/lambda_control.sh stop"
 }
 
 stop() {

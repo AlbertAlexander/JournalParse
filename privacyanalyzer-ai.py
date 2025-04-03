@@ -71,7 +71,7 @@ class OllamaClient:
                 raise
 
 class ContextualPseudonymizer:
-    def __init__(self, model: str = "mistral-openorca", mode='local', host='localhost', port=11434):
+    def __init__(self, model: str = "llama3.3:latest", mode='local', host='localhost', port=11434):
         """Initialize with configurable Ollama client"""
         self.model = model
         self.ollama_client = OllamaClient(mode=mode, host=host, port=port)
@@ -205,7 +205,7 @@ class ContextualPseudonymizer:
             print(f"\n✗ Error running Ollama: {e}")
             return ""
 
-    def detect_identifiers(self, text: str) -> Dict:
+    def detect_identifiers(self, text: str, chunk_index: int = None) -> Dict:
         """Use Ollama API to detect identifiers in text"""
         try:
             print(f"Processing chunk of {len(text):,} chars")
@@ -260,42 +260,127 @@ IMPORTANT:
                     json_end = response['response'].rfind('}') + 1
                     if json_start >= 0 and json_end > json_start:
                         json_str = response['response'][json_start:json_end]
-                        result = json.loads(json_str)
                         
-                        # Process and display categories
-                        print("\nProcessing categories:")
-                        for category, subcategories in result.items():
-                            print(f"Category: {category}")
-                            print(f"Subcategories: {subcategories}")
-                            for subcategory, items in subcategories.items():
-                                print(f"  Subcategory: {subcategory}")
-                                print(f"  Items: {items}")
-                        
-                        # Log after all processing is complete
-                        log_dir = self.output_dir / "ollama_logs"
-                        log_dir.mkdir(exist_ok=True)
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        log_file = log_dir / f"ollama_response_{timestamp}.txt"
-                        with open(log_file, "w") as f:
-                            f.write(f"PROMPT:\n{prompt}\n\nRESPONSE:\n{response['response']}\n\nPROCESSED:\n{json.dumps(result, indent=2)}")
-                        
-                        return result
+                        try:
+                            result = json.loads(json_str)
+                            
+                            # Check for missing categories or subcategories
+                            issues = []
+                            expected_categories = {
+                                "names": ["names", "role_identifiers"],
+                                "places": ["addresses", "landmarks", "neighborhoods"],
+                                "contacts": ["phones", "emails", "social_media"],
+                                "businesses": ["specific_businesses", "institutions"]
+                            }
+                            
+                            # Check for missing categories
+                            for category, subcategories in expected_categories.items():
+                                if category not in result:
+                                    issues.append(f"Missing category: {category}")
+                                    # Add empty category
+                                    result[category] = {}
+                                
+                                # Check for missing subcategories
+                                if category in result:
+                                    for subcategory in subcategories:
+                                        if subcategory not in result[category]:
+                                            issues.append(f"Missing subcategory: {category}.{subcategory}")
+                                            # Add empty subcategory
+                                            result[category][subcategory] = []
+                            
+                            # Log issues if any
+                            if issues and chunk_index is not None:
+                                error_log_dir = self.output_dir / "error_logs"
+                                error_log_dir.mkdir(exist_ok=True)
+                                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                error_file = error_log_dir / f"json_structure_error_{chunk_index+1}_{timestamp}.txt"
+                                with open(error_file, "w") as f:
+                                    f.write(f"CHUNK: {chunk_index+1}\n\n")
+                                    f.write("STRUCTURE ISSUES:\n")
+                                    for issue in issues:
+                                        f.write(f"- {issue}\n")
+                                    f.write("\nRAW RESPONSE:\n")
+                                    f.write(response['response'])
+                                    f.write("\n\nPROCESSED JSON:\n")
+                                    f.write(json.dumps(result, indent=2))
+                                
+                                print(f"\n⚠️ Found {len(issues)} structure issues in chunk {chunk_index+1}. See log for details.")
+                            
+                            # Process and display categories
+                            print("\nProcessing categories:")
+                            for category, subcategories in result.items():
+                                print(f"Category: {category}")
+                                print(f"Subcategories: {subcategories}")
+                                for subcategory, items in subcategories.items():
+                                    print(f"  Subcategory: {subcategory}")
+                                    print(f"  Items: {items}")
+                            
+                            # Log after all processing is complete
+                            log_dir = self.output_dir / "ollama_logs"
+                            log_dir.mkdir(exist_ok=True)
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            log_file = log_dir / f"ollama_response_{timestamp}.txt"
+                            with open(log_file, "w") as f:
+                                f.write(f"PROMPT:\n{prompt}\n\nRESPONSE:\n{response['response']}\n\nPROCESSED:\n{json.dumps(result, indent=2)}")
+                            
+                            return result
+                        except KeyError as e:
+                            print(f"\nMissing key in JSON: {str(e)}")
+                            if chunk_index is not None:
+                                self._log_json_error(chunk_index, f"KeyError: {str(e)}", response['response'], json_str)
+                            return {}
+                        except Exception as e:
+                            print(f"\nError processing JSON: {str(e)}")
+                            if chunk_index is not None:
+                                self._log_json_error(chunk_index, f"Processing error: {str(e)}", response['response'], json_str)
+                            return {}
                     else:
                         print("No valid JSON found in response")
+                        if chunk_index is not None:
+                            self._log_json_error(chunk_index, "No valid JSON found", response['response'])
                         return {}
                     
                 except json.JSONDecodeError as e:
                     print(f"\nJSON parsing error: {str(e)}")
-                    print("Raw response:", response['response'])
+                    if chunk_index is not None:
+                        self._log_json_error(chunk_index, f"JSON decode error: {str(e)}", response['response'])
                     return {}
                     
             except Exception as e:
                 print(f"Generation error: {e}")
+                if chunk_index is not None:
+                    self._log_json_error(chunk_index, f"Generation error: {str(e)}", "No response received")
                 return {}
             
         except Exception as e:
             print(f"\nUnexpected error: {e}")
+            if chunk_index is not None:
+                self._log_json_error(chunk_index, f"Unexpected error: {str(e)}", "")
             return {}
+
+    def _log_json_error(self, chunk_index, error_message, response, json_str=None):
+        """Log JSON errors to file for debugging"""
+        try:
+            error_log_dir = self.output_dir / "error_logs"
+            error_log_dir.mkdir(exist_ok=True)
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            error_file = error_log_dir / f"json_error_{chunk_index+1}_{timestamp}.txt"
+            
+            with open(error_file, "w") as f:
+                f.write(f"CHUNK: {chunk_index+1}\n")
+                f.write(f"ERROR: {error_message}\n\n")
+                f.write("RAW RESPONSE:\n")
+                f.write(response)
+                
+                if json_str:
+                    f.write("\n\nEXTRACTED JSON STRING:\n")
+                    f.write(json_str)
+            
+            print(f"Error details logged to {error_file}")
+            
+        except Exception as e:
+            print(f"Error logging JSON error: {e}")
 
     def generate_contextual_pseudonym(self, original: str, category: str, 
                                     context: str = "") -> str:
@@ -431,6 +516,10 @@ Return only the replacement, no other text."""
             self.output_dir = input_path.parent / "pseudonymized_output"
             self.output_dir.mkdir(exist_ok=True)
             
+            # Create error log directory
+            error_log_dir = self.output_dir / "error_logs"
+            error_log_dir.mkdir(exist_ok=True)
+            
             # Try to load existing substitutions first
             self._load_existing_substitutions(self.output_dir, input_path.stem)
             
@@ -451,22 +540,39 @@ Return only the replacement, no other text."""
             
             # Track all terms found across chunks
             all_terms = set()
+            failed_chunks = []
 
             try:
                 for i, chunk in enumerate(tqdm(chunks, desc="Identifying terms")):
                     print(f"\nProcessing chunk {i+1}/{len(chunks)}")
-                    identifiers = self.detect_identifiers(chunk)
-                    
-                    if identifiers:  # Only process if we got valid identifiers
-                        for category, subcategories in identifiers.items():
-                            for subcategory, items in subcategories.items():
-                                for item in items:
-                                    if item and not any(item.lower() in self.preserve for p in self.preserve):
-                                        # Add to both running sets
-                                        all_terms.add((item, category))
-                                        self.identified_terms.add((item, category))
-                                        key = (item, category)
-                                        self.identifier_occurrences[key] = text.count(item)
+                    try:
+                        # Pass chunk index for better error logging
+                        identifiers = self.detect_identifiers(chunk, i)
+                        
+                        if identifiers:  # Only process if we got valid identifiers
+                            for category, subcategories in identifiers.items():
+                                for subcategory, items in subcategories.items():
+                                    for item in items:
+                                        if item and not any(item.lower() in self.preserve for p in self.preserve):
+                                            # Add to both running sets
+                                            all_terms.add((item, category))
+                                            self.identified_terms.add((item, category))
+                                            key = (item, category)
+                                            self.identifier_occurrences[key] = text.count(item)
+                    except Exception as e:
+                        # Log the error but continue processing
+                        error_msg = f"Error processing chunk {i+1}: {str(e)}"
+                        print(f"\n⚠️ {error_msg}")
+                        failed_chunks.append((i, chunk[:100] + "...", str(e)))
+                        
+                        # Save error details to log
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        error_file = error_log_dir / f"chunk_error_{i+1}_{timestamp}.txt"
+                        with open(error_file, "w") as f:
+                            f.write(f"ERROR: {str(e)}\n\nCHUNK CONTENT:\n{chunk}")
+                        
+                        # Continue with next chunk
+                        continue
                     
                     # Save progress periodically
                     if i % 5 == 0:  # Save every 5 chunks
@@ -484,6 +590,15 @@ Return only the replacement, no other text."""
             self.identified_terms.update(all_terms)
             self._generate_substitutions()  # Generate final substitutions
             self._save_progress(self.output_dir, chunks, len(chunks)-1, input_path.stem)
+            
+            # Log failed chunks summary
+            if failed_chunks:
+                print(f"\n⚠️ {len(failed_chunks)} chunks failed processing:")
+                with open(error_log_dir / "failed_chunks_summary.txt", "w") as f:
+                    f.write(f"Total failed chunks: {len(failed_chunks)}\n\n")
+                    for idx, preview, error in failed_chunks:
+                        print(f"  - Chunk {idx+1}: {error}")
+                        f.write(f"Chunk {idx+1}: {preview}\nError: {error}\n\n")
             
             # Process chunks with consistent substitution handling
             print("Applying substitutions...")
@@ -519,6 +634,8 @@ Return only the replacement, no other text."""
             print(f"\nProcessing completed in {(time.time() - start_time) / 60:.1f} minutes")
             print(f"New substitutions created: {len(self.runtime_substitutions)}")
             print(f"Total substitutions used: {sum(len(subs) for subs in self.substitutions.values())}")
+            if failed_chunks:
+                print(f"⚠️ {len(failed_chunks)} chunks failed processing. See error logs for details.")
 
         except Exception as e:
             print(f"\nError processing file: {e}")
@@ -655,8 +772,8 @@ def main():
     )
     parser.add_argument(
         "--model", 
-        default="mistral-openorca",
-        help="Ollama model to use (default: mistral-openorca)"
+        default="llama3.3:latest",
+        help="Ollama model to use (default: llama3.3:latest)"
     )
     # Add new connection arguments
     parser.add_argument(
@@ -675,6 +792,12 @@ def main():
         type=int,
         default=11434,
         help="Ollama port (default: 11434)"
+    )
+    parser.add_argument(
+        "--resume-from",
+        type=int,
+        default=0,
+        help="Resume processing from a specific chunk index (0-based)"
     )
     
     args = parser.parse_args()
