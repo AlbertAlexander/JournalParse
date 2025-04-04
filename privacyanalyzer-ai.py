@@ -290,10 +290,10 @@ IMPORTANT:
                             
                             # Log issues if any
                             if issues and chunk_index is not None:
-                                error_log_dir = self.output_dir / "error_logs"
-                                error_log_dir.mkdir(exist_ok=True)
+                                error_logs_dir = self.output_dir / "error_logs"
+                                error_logs_dir.mkdir(exist_ok=True)
                                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                error_file = error_log_dir / f"json_structure_error_{chunk_index+1}_{timestamp}.txt"
+                                error_file = error_logs_dir / f"json_structure_error_{chunk_index+1}_{timestamp}.txt"
                                 with open(error_file, "w") as f:
                                     f.write(f"CHUNK: {chunk_index+1}\n\n")
                                     f.write("STRUCTURE ISSUES:\n")
@@ -361,11 +361,11 @@ IMPORTANT:
     def _log_json_error(self, chunk_index, error_message, response, json_str=None):
         """Log JSON errors to file for debugging"""
         try:
-            error_log_dir = self.output_dir / "error_logs"
-            error_log_dir.mkdir(exist_ok=True)
+            error_logs_dir = self.output_dir / "error_logs"
+            error_logs_dir.mkdir(exist_ok=True)
             
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            error_file = error_log_dir / f"json_error_{chunk_index+1}_{timestamp}.txt"
+            error_file = error_logs_dir / f"json_error_{chunk_index+1}_{timestamp}.txt"
             
             with open(error_file, "w") as f:
                 f.write(f"CHUNK: {chunk_index+1}\n")
@@ -518,8 +518,8 @@ Return only the replacement, no other text."""
             self.output_dir.mkdir(exist_ok=True)
             
             # Create error log directory
-            error_log_dir = self.output_dir / "error_logs"
-            error_log_dir.mkdir(exist_ok=True)
+            error_logs_dir = self.output_dir / "error_logs"
+            error_logs_dir.mkdir(exist_ok=True)
             
             # Try to load existing substitutions first
             self._load_existing_substitutions(self.output_dir, input_path.stem)
@@ -553,51 +553,111 @@ Return only the replacement, no other text."""
             all_terms = set()
             failed_chunks = []
             
+            # Initialize before the loop
+            processed_chunks = []
+            total_chunks = len(chunks)
+            save_interval = 5
+            current_chunk_index = 0
+
+            # If resuming, fill processed_chunks with placeholders up to the resume point
+            if resume_from > 0:
+                processed_chunks = [chunk for i, chunk in enumerate(chunks) if i < resume_from]
+
             try:
-                # Adjust the range to start from resume_from
-                for i in range(resume_from, len(chunks)):
-                    chunk = chunks[i]
-                    print(f"\nProcessing chunk {i+1}/{len(chunks)}")
+                for i, chunk in enumerate(chunks):
+                    current_chunk_index = i
+                    if i < resume_from:
+                        continue  # Skip processing, but processed_chunks already contains these
+
+                    print(f"\nProcessing chunk {i} of {total_chunks-1}")
+                    # Default to original chunk text in case of any processing error below
+                    processed_chunk = chunk
+                    llm_data = {} # Initialize llm_data for the chunk
+
                     try:
-                        # Pass chunk index for better error logging
-                        identifiers = self.detect_identifiers(chunk, i)
-                        
-                        if identifiers:  # Only process if we got valid identifiers
-                            for category, subcategories in identifiers.items():
+                        # 1. Call detect_identifiers to get the parsed JSON data
+                        # This method handles prompt creation, Ollama query, and initial JSON parsing/errors
+                        llm_data = self.detect_identifiers(chunk, chunk_index=i)
+
+                        # 2. Check if detect_identifiers succeeded
+                        if not llm_data: # detect_identifiers returns {} on error
+                            print(f"⚠️ Identifier detection failed or returned empty for chunk {i}. Skipping further processing for this chunk.")
+                            # Keep original chunk text (processed_chunk already defaults to chunk)
+                            # Error logging for this case is handled within detect_identifiers via _log_json_error
+
+                        else:
+                            # 3. === NORMALIZATION STEP ===
+                            # We have valid (though potentially structurally imperfect) JSON from detect_identifiers. Normalize it.
+                            normalized_data, structure_was_valid = self._normalize_llm_response(llm_data)
+
+                            if not structure_was_valid:
+                                # Log the structure issue using the new mechanism
+                                error_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                # Use the correct variable name 'error_log_dir'
+                                error_file = error_logs_dir / f"json_structure_error_{i}_{error_time}.txt"
+                                with open(error_file, 'w', encoding='utf-8') as f:
+                                    f.write(f"STRUCTURE ISSUES DETECTED in chunk {i} (after initial parsing):\n")
+                                    for issue in self.last_normalization_issues: f.write(f"- {issue}\n")
+                                    f.write(f"\nRAW PARSED JSON from detect_identifiers:\n```json\n{json.dumps(llm_data, indent=4)}\n```\n")
+                                    f.write(f"\nNORMALIZED DATA USED FOR PROCESSING:\n```json\n{json.dumps(normalized_data, indent=4)}\n```\n")
+                                print(f"⚠️ JSON structure issues logged for chunk {i}. See {error_file}. Proceeding with normalized data.")
+                            # === END NORMALIZATION STEP ===
+
+                            # 4. Update identified terms based on the *normalized* data
+                            for category, subcategories in normalized_data.items():
                                 for subcategory, items in subcategories.items():
                                     for item in items:
-                                        if item and not any(item.lower() in self.preserve for p in self.preserve):
-                                            # Add to both running sets
-                                            all_terms.add((item, category))
+                                         if item and isinstance(item, str): # Ensure item is a non-empty string
+                                            # Store only the top-level category
                                             self.identified_terms.add((item, category))
-                                            key = (item, category)
-                                            self.identifier_occurrences[key] = text.count(item)
+                                            occurrence_key = (item, category)
+                                            self.identifier_occurrences[occurrence_key] = self.identifier_occurrences.get(occurrence_key, 0) + 1
+
+                            # 5. Generate/Update substitutions based on newly identified terms
+                            self._generate_substitutions()
+
+                            # 6. Apply substitutions using your existing logic
+                            processed_chunk = chunk  # Start with original text
+                            
+                            # Sort terms by length (longest first) to prevent partial replacements
+                            sorted_terms = sorted(self.identified_terms, key=lambda x: len(x[0]), reverse=True)
+                            
+                            for term, category in sorted_terms:
+                                if term in processed_chunk:
+                                    replacement = self.get_substitution(term, category, chunk)
+                                    processed_chunk = re.sub(
+                                        re.escape(term),
+                                        replacement,
+                                        processed_chunk,
+                                        flags=re.IGNORECASE
+                                    )
+
                     except Exception as e:
-                        # Log the error but continue processing
-                        error_msg = f"Error processing chunk {i+1}: {str(e)}"
-                        print(f"\n⚠️ {error_msg}")
-                        failed_chunks.append((i, chunk[:100] + "...", str(e)))
-                        
-                        # Save error details to log
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        error_file = error_log_dir / f"chunk_error_{i+1}_{timestamp}.txt"
-                        with open(error_file, "w") as f:
-                            f.write(f"ERROR: {str(e)}\n\nCHUNK CONTENT:\n{chunk}")
-                        
-                        # Continue with next chunk
-                        continue
-                    
+                        # Catch any other unexpected error during the processing of this chunk *outside* detect_identifiers
+                        error_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        error_file = error_logs_dir / f"processing_error_{i}_{error_time}.txt"
+                        with open(error_file, 'w', encoding='utf-8') as f: # Added encoding
+                             import traceback
+                             f.write(f"UNEXPECTED PROCESSING ERROR in chunk {i} (outside detect_identifiers): {str(e)}\n\n")
+                             f.write(f"CHUNK CONTENT (first 500 chars):\n{chunk[:500]}...\n\n")
+                             f.write(f"LLM Data obtained from detect_identifiers (if any):\n{json.dumps(llm_data, indent=4)}\n\n")
+                             f.write(f"TRACEBACK:\n{traceback.format_exc()}\n")
+                        print(f"❌ Unexpected error processing chunk {i} outside detect_identifiers: {str(e)}. See {error_file}. Skipping substitutions.")
+                        # Keep original chunk text (processed_chunk already defaults to chunk)
+
+                    # Append or update the processed chunk
+                    if i >= len(processed_chunks):
+                        processed_chunks.append(processed_chunk)
+                    else:
+                        processed_chunks[i] = processed_chunk
+
                     # Save progress periodically
-                    if i % 5 == 0 or i == len(chunks) - 1:
-                        # Generate substitutions before saving
-                        self._generate_substitutions()
-                        # Use input_path.name as original_name
-                        self._save_progress(self.output_dir, input_path.stem, i, input_path.name)
+                    if i % save_interval == 0 or i == total_chunks - 1:
+                        self._save_progress(self.output_dir, input_path.stem, i)
 
             except KeyboardInterrupt:
                 print("\n\nProcessing interrupted! Saving current progress...")
-                # Use input_path.name as original_name
-                self._save_progress(self.output_dir, input_path.stem, i, input_path.name)
+                self._save_progress(self.output_dir, input_path.stem, i)
                 print("Progress saved. You can resume from the last saved state.")
                 sys.exit(1)
             
@@ -608,7 +668,7 @@ Return only the replacement, no other text."""
             # Log failed chunks summary
             if failed_chunks:
                 print(f"\n⚠️ {len(failed_chunks)} chunks failed processing:")
-                with open(error_log_dir / "failed_chunks_summary.txt", "w") as f:
+                with open(error_logs_dir / "failed_chunks_summary.txt", "w") as f:
                     f.write(f"Total failed chunks: {len(failed_chunks)}\n\n")
                     for idx, preview, error in failed_chunks:
                         print(f"  - Chunk {idx+1}: {error}")
@@ -635,10 +695,12 @@ Return only the replacement, no other text."""
                 
                 processed_chunks.append(processed_text)
                 
-                # Removed periodic saving during substitution phase
+                # Save progress periodically
+                if i % 10 == 0:
+                    self._save_progress(self.output_dir, input_path.stem, i)
 
             # Save final results
-            self._save_final_results(self.output_dir, processed_chunks, input_path.stem, resume_from > 0)
+            self._save_final_results(self.output_dir, processed_chunks, input_path.stem)
             
             # Generate detailed report
             self._save_detailed_report(self.output_dir, input_path.stem)
@@ -861,6 +923,102 @@ Return only the replacement, no other text."""
             'progress': output_dir / f"{file_stem}_progress.json",
             'report': output_dir / f"{file_stem}_detailed_report.txt"
         }
+
+    EXPECTED_STRUCTURE = {
+        "names": {
+            "names": [],             # Changed from personal_names/family_names
+            "role_identifiers": []   # Kept as is
+        },
+        "places": {
+            "addresses": [],
+            "landmarks": [],
+            "neighborhoods": []
+        },
+        "contacts": {
+            "phones": [],
+            "emails": [],
+            "social_media": []
+        },
+        "businesses": {
+            "specific_businesses": [],
+            "institutions": []
+        }
+    }
+
+    def _normalize_llm_response(self, llm_data: dict) -> tuple[dict, bool]:
+        """
+        Normalizes the parsed LLM JSON data to fit the expected structure.
+
+        Args:
+            llm_data: The dictionary parsed from the LLM's JSON response.
+
+        Returns:
+            A tuple containing:
+            - normalized_data (dict): Data conforming to EXPECTED_STRUCTURE.
+            - structure_was_valid (bool): True if the input llm_data perfectly
+                                          matched the expected structure, False otherwise.
+        """
+        import copy
+        normalized_data = copy.deepcopy(self.EXPECTED_STRUCTURE)
+        structure_was_valid = True
+        issues_found = []
+
+        if not isinstance(llm_data, dict):
+            issues_found.append("LLM response was not a dictionary.")
+            # Store issues for logging if needed
+            self._last_normalization_issues = issues_found
+            return normalized_data, False # Return empty structure if not a dict
+
+        # Check for unexpected top-level keys
+        for key in llm_data:
+            if key not in self.EXPECTED_STRUCTURE:
+                issues_found.append(f"Unexpected top-level key: {key}")
+                structure_was_valid = False
+
+        # Populate known categories and subcategories
+        for category, subcategories in self.EXPECTED_STRUCTURE.items():
+            if category not in llm_data:
+                issues_found.append(f"Missing category: {category}")
+                structure_was_valid = False
+                continue # Skip to next expected category
+
+            if not isinstance(llm_data[category], dict):
+                issues_found.append(f"Category '{category}' was not a dictionary.")
+                structure_was_valid = False
+                continue # Skip processing this category
+
+            # Check for unexpected subkeys within the category
+            for subkey in llm_data[category]:
+                # No alias handling needed anymore for 'names'
+                if subkey not in subcategories:
+                    issues_found.append(f"Unexpected subcategory: {category}.{subkey}")
+                    structure_was_valid = False
+
+            # Populate known subcategories
+            for subcategory in subcategories:
+                # No alias handling needed anymore for 'names'
+                if subcategory not in llm_data[category]:
+                    issues_found.append(f"Missing subcategory: {category}.{subcategory}")
+                    structure_was_valid = False
+                    continue
+
+                if isinstance(llm_data[category][subcategory], list):
+                    # Ensure all items are strings and filter out None
+                    normalized_data[category][subcategory] = [str(item) for item in llm_data[category][subcategory] if item is not None]
+                else:
+                    issues_found.append(f"Subcategory {category}.{subcategory} was not a list.")
+                    structure_was_valid = False
+                    # Keep the default empty list in normalized_data
+
+        # Store issues for logging if needed
+        self._last_normalization_issues = issues_found
+        return normalized_data, structure_was_valid
+
+    # Add a property to store issues for logging
+    @property
+    def last_normalization_issues(self):
+        """Gets the list of issues found during the last normalization attempt."""
+        return getattr(self, '_last_normalization_issues', [])
 
 def main():
     """
