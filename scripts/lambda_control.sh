@@ -117,6 +117,12 @@ stop() {
     echo "✅ Instance stopped"
 }
 
+model() {
+    echo "Checking Ollama model..."
+    ssh -i "$SSH_KEY_PATH" "$SSH_USER@$INSTANCE_IP" "curl -s http://localhost:11434/api/generate -d '{\"model\":\"llama3\",\"prompt\":\"What model are you?\",\"stream\":false}' | jq -r '.model + \": \" + .response'"
+    echo "Model check complete."
+}
+
 case "$1" in
     "start")
         start
@@ -124,7 +130,10 @@ case "$1" in
     "stop")
         stop
         ;;
+    "model")
+        model
+        ;;
     *)
-        echo "Usage: ./lambda_control.sh [start|stop]"
+        echo "Usage: ./lambda_control.sh [start|stop|model]"
         ;;
 esac

@@ -437,17 +437,18 @@ Return only the replacement, no other text."""
                 changelog += f"Replaced {item} with {pseudonym} in {category}\n"
         return changelog
 
-    def _load_existing_substitutions(self, output_dir: Path, original_name: str) -> bool:
+    def _load_existing_substitutions(self, output_dir: Path, file_stem: str) -> bool:
         """Load existing substitutions with error handling"""
-        substitutions_file = output_dir / f"{original_name}_substitutions.json"
+        mapping_file = output_dir / f"{file_stem}_mapping.json"
         try:
-            if substitutions_file.exists():
-                print(f"Found existing substitutions file: {substitutions_file}")
-                with open(substitutions_file, 'r') as f:
+            if mapping_file.exists():
+                print(f"Found existing substitutions file: {mapping_file}")
+                with open(mapping_file, 'r') as f:
                     existing = json.load(f)
                     # Update substitutions while preserving structure
                     for category in self.substitutions:
-                        self.substitutions[category].update(existing.get(category, {}))
+                        if category in existing:
+                            self.substitutions[category].update(existing.get(category, {}))
                     print(f"Loaded {sum(len(subs) for subs in self.substitutions.values())} existing substitutions")
                     return True
             else:
@@ -505,8 +506,8 @@ Return only the replacement, no other text."""
                 elif category == 'relationships':
                     self.substitutions[category][term] = f"[Relationship{len(self.substitutions[category])+1}]"
 
-    def process_file(self, file_path: str):
-        """Process file with additional error handling"""
+    def process_file(self, file_path: str, resume_from: int = 0):
+        """Process file with ability to resume from a specific chunk"""
         try:
             input_path = Path(file_path)
             if not input_path.exists():
@@ -523,6 +524,10 @@ Return only the replacement, no other text."""
             # Try to load existing substitutions first
             self._load_existing_substitutions(self.output_dir, input_path.stem)
             
+            # Load progress if resuming
+            if resume_from > 0:
+                self._load_progress(self.output_dir, input_path.stem)
+            
             start_time = time.time()
             print(f"Reading {file_path}...")
             
@@ -538,12 +543,20 @@ Return only the replacement, no other text."""
             chunks = self._chunk_text(text)
             print(f"Split text into {len(chunks)} chunks")
             
+            if resume_from > 0:
+                if resume_from >= len(chunks):
+                    print(f"Error: Resume index {resume_from} is out of range (max: {len(chunks)-1})")
+                    sys.exit(1)
+                print(f"Resuming from chunk {resume_from+1} of {len(chunks)}")
+            
             # Track all terms found across chunks
             all_terms = set()
             failed_chunks = []
-
+            
             try:
-                for i, chunk in enumerate(tqdm(chunks, desc="Identifying terms")):
+                # Adjust the range to start from resume_from
+                for i in range(resume_from, len(chunks)):
+                    chunk = chunks[i]
                     print(f"\nProcessing chunk {i+1}/{len(chunks)}")
                     try:
                         # Pass chunk index for better error logging
@@ -575,21 +588,22 @@ Return only the replacement, no other text."""
                         continue
                     
                     # Save progress periodically
-                    if i % 5 == 0:  # Save every 5 chunks
+                    if i % 5 == 0 or i == len(chunks) - 1:
                         # Generate substitutions before saving
                         self._generate_substitutions()
-                        self._save_progress(self.output_dir, chunks[:i+1], i, input_path.stem)
+                        # Use input_path.name as original_name
+                        self._save_progress(self.output_dir, input_path.stem, i, input_path.name)
 
             except KeyboardInterrupt:
                 print("\n\nProcessing interrupted! Saving current progress...")
-                self._save_progress(self.output_dir, chunks[:i+1], i, input_path.stem)
+                # Use input_path.name as original_name
+                self._save_progress(self.output_dir, input_path.stem, i, input_path.name)
                 print("Progress saved. You can resume from the last saved state.")
                 sys.exit(1)
             
             # After all chunks, update identified_terms with everything found
             self.identified_terms.update(all_terms)
             self._generate_substitutions()  # Generate final substitutions
-            self._save_progress(self.output_dir, chunks, len(chunks)-1, input_path.stem)
             
             # Log failed chunks summary
             if failed_chunks:
@@ -621,12 +635,10 @@ Return only the replacement, no other text."""
                 
                 processed_chunks.append(processed_text)
                 
-                # Save progress periodically
-                if i % 10 == 0:
-                    self._save_progress(self.output_dir, processed_chunks, i, input_path.stem)
+                # Removed periodic saving during substitution phase
 
             # Save final results
-            self._save_final_results(self.output_dir, processed_chunks, input_path.stem)
+            self._save_final_results(self.output_dir, processed_chunks, input_path.stem, resume_from > 0)
             
             # Generate detailed report
             self._save_detailed_report(self.output_dir, input_path.stem)
@@ -663,62 +675,85 @@ Return only the replacement, no other text."""
         print(f"Created new directory: {new_dir}")
         return new_dir
 
-    def _save_progress(self, output_dir: Path, chunks: List[str], chunk_num: int, original_name: str):
-        """Save intermediate results with version control"""
-        model_dir = self._get_output_directory(output_dir, original_name)
+    def _save_progress(self, output_dir, file_stem, last_chunk, original_name=None):
+        """Save progress for potential resumption"""
+        progress_file = output_dir / f"{file_stem}_progress.json"
         
-        # Add run timestamp to track multiple passes in same day
-        timestamp = datetime.now().strftime("%H%M%S")
+        # Use file_stem as original_name if not provided
+        if original_name is None:
+            original_name = file_stem
         
-        # Base filenames with pass number
-        base_files = {
-            'substitutions': model_dir / f"{original_name}_substitutions.json",
-            'partial': model_dir / f"{original_name}_pseudonymized_partial.txt",
-            'terms': model_dir / f"{original_name}_identified_terms.json",
-            'log': model_dir / "processing_log.txt"
+        progress_data = {
+            'identified_terms': [[item, category] for item, category in self.identified_terms],
+            'identifier_occurrences': {str([k[0], k[1]]): v for k, v in self.identifier_occurrences.items()},
+            'substitutions': self.substitutions,
+            'runtime_substitutions': self.runtime_substitutions,
+            'last_processed_chunk': last_chunk,
+            'status': 'in_progress',
+            'original_name': original_name
         }
         
-        # Save current state
-        with open(base_files['substitutions'], 'w') as f:
-            json.dump(self.substitutions, f, indent=2)
+        with open(progress_file, 'w') as f:
+            json.dump(progress_data, f, indent=2)
         
-        with open(base_files['partial'], 'w') as f:
-            f.write('\n\n'.join(chunks[:chunk_num+1]))
-        
-        with open(base_files['terms'], 'w') as f:
-            json.dump(list(self.identified_terms), f, indent=2)
-        
-        # Append to processing log
-        with open(base_files['log'], 'a') as f:
-            f.write(f"\n[{timestamp}] Processed chunk {chunk_num+1}/{len(chunks)}")
-        
-        print(f"\nSaved progress at chunk {chunk_num+1}/{len(chunks)} to {model_dir}")
+        print(f"\nProgress saved to {progress_file}")
+        print(f"Processed up to chunk {last_chunk}")
 
-    def _save_final_results(self, output_dir: str, processed_chunks: List[str], original_name: str):
-        """Save final results and changelog"""
-        # Save pseudonymized text
-        with open(output_dir / f"{original_name}_pseudonymized.txt", 'w') as f:
-            f.write('\n\n'.join(processed_chunks))
+    def _save_final_results(self, output_dir: Path, processed_chunks: list, file_stem: str, resume_mode=False):
+        """Save final pseudonymized text and substitution mapping with options for resumption"""
+        output_file = output_dir / f"{file_stem}_pseudonymized.txt"
+        mapping_file = output_dir / f"{file_stem}_mapping.json"
         
-        # Save substitutions
-        with open(output_dir / f"{original_name}_substitutions.json", 'w') as f:
-            json.dump(self.substitutions, f, indent=2)
+        # Handle resumption - append by default if file exists
+        if resume_mode and output_file.exists():
+            print(f"\nResume mode: Appending to existing file {output_file}")
+            try:
+                # Read existing content
+                with open(output_file, 'r') as f:
+                    existing_content = f.read()
+                
+                # Write combined content
+                with open(output_file, 'w') as f:
+                    f.write(existing_content + ''.join(processed_chunks))
+                print(f"Successfully appended pseudonymized text to {output_file}")
+            except Exception as e:
+                print(f"Error appending to file: {e}")
+                print("Creating new file instead.")
+                with open(output_file, 'w') as f:
+                    f.write(''.join(processed_chunks))
+                print(f"Pseudonymized text saved to {output_file}")
+        else:
+            # Normal save (no existing file or not resuming)
+            with open(output_file, 'w') as f:
+                f.write(''.join(processed_chunks))
+            print(f"Pseudonymized text saved to {output_file}")
         
-        # Save changelog
-        with open(output_dir / f"{original_name}_changelog.txt", 'w') as f:
-            f.write(self.create_changelog())
+        # Save the substitution mapping
+        mapping = {}
+        for category, items in self.substitutions.items():
+            mapping[category] = {}
+            for original, replacement in items.items():
+                mapping[category][original] = replacement
         
-        # Generate statistics
-        stats = {
-            "total_substitutions": sum(len(subs) for subs in self.substitutions.values()),
-            "categories": {
-                category: len(subs) 
-                for category, subs in self.substitutions.items()
-            }
+        with open(mapping_file, 'w') as f:
+            json.dump(mapping, f, indent=2)
+        print(f"Substitution mapping saved to {mapping_file}")
+        
+        # Save progress file with completed status and metadata
+        progress_file = output_dir / f"{file_stem}_progress.json"
+        progress_data = {
+            'identified_terms': [[item, category] for item, category in self.identified_terms],
+            'identifier_occurrences': {str([k[0], k[1]]): v for k, v in self.identifier_occurrences.items()},
+            'substitutions': self.substitutions,
+            'runtime_substitutions': self.runtime_substitutions,
+            'last_processed_chunk': len(processed_chunks) - 1,
+            'status': 'completed',
+            'total_chunks': len(processed_chunks),
+            'output_file': str(output_file)
         }
         
-        with open(output_dir / f"{original_name}_statistics.json", 'w') as f:
-            json.dump(stats, f, indent=2)
+        with open(progress_file, 'w') as f:
+            json.dump(progress_data, f, indent=2)
 
     def _save_detailed_report(self, output_dir: str, original_name: str):
         """Generate detailed report including substitution sources"""
@@ -762,10 +797,93 @@ Return only the replacement, no other text."""
             print(f"Response received: {test_response}")
             return False
 
+    def _load_progress(self, output_dir: Path, file_stem: str):
+        """
+        Load progress from a previous run.
+        
+        Returns:
+            int: The last processed chunk index, or 0 if no progress was loaded
+        """
+        progress_file = output_dir / f"{file_stem}_progress.json"
+        
+        if not progress_file.exists():
+            print(f"No progress file found at {progress_file}")
+            return 0
+        
+        try:
+            with open(progress_file, 'r') as f:
+                progress_data = json.load(f)
+            
+            # Restore identified terms
+            if 'identified_terms' in progress_data:
+                self.identified_terms = set(tuple(item) for item in progress_data['identified_terms'])
+                print(f"Loaded {len(self.identified_terms)} previously identified terms")
+            
+            # Restore identifier occurrences
+            if 'identifier_occurrences' in progress_data:
+                self.identifier_occurrences = {}
+                for k, v in progress_data['identifier_occurrences'].items():
+                    try:
+                        key = tuple(json.loads(k))
+                        self.identifier_occurrences[key] = v
+                    except Exception as e:
+                        print(f"Warning: Could not parse occurrence key {k}: {e}")
+            
+            # Restore runtime substitutions
+            if 'runtime_substitutions' in progress_data:
+                self.runtime_substitutions = progress_data['runtime_substitutions']
+                print(f"Loaded {len(self.runtime_substitutions)} runtime substitutions")
+            
+            # Get last processed chunk
+            last_chunk = progress_data.get('last_processed_chunk', 0)
+            print(f"Last processed chunk: {last_chunk}")
+            
+            print(f"Successfully loaded progress from {progress_file}")
+            return last_chunk
+        except Exception as e:
+            print(f"Error loading progress: {e}")
+            print("Starting fresh instead.")
+            return 0
+
+    def _get_file_paths(self, output_dir: Path, file_stem: str) -> dict:
+        """
+        Get standardized file paths for all output files.
+        
+        File naming convention:
+        - {file_stem}_pseudonymized.txt: The pseudonymized output text
+        - {file_stem}_mapping.json: Mapping between original terms and pseudonyms
+        - {file_stem}_progress.json: Progress tracking for resumption
+        - {file_stem}_detailed_report.txt: Detailed report of substitutions
+        """
+        return {
+            'output': output_dir / f"{file_stem}_pseudonymized.txt",
+            'mapping': output_dir / f"{file_stem}_mapping.json",
+            'progress': output_dir / f"{file_stem}_progress.json",
+            'report': output_dir / f"{file_stem}_detailed_report.txt"
+        }
+
 def main():
-    parser = argparse.ArgumentParser(
-        description="Pseudonymize personal information in text while preserving context"
-    )
+    """
+    Main entry point for the Privacy Analyzer tool.
+    
+    Command line usage:
+        python privacyanalyzer-ai.py <file> [options]
+    
+    Parameters:
+        file: Path to the text file to process
+        --mode: Use 'local' or 'remote' Ollama (default: local)
+        --host: Ollama host (default: localhost)
+        --port: Ollama port (default: 11434)
+        --model: Ollama model to use (default: llama3.3:latest)
+        --resume-from: Resume processing from a specific chunk index (0-based)
+        --output-dir: Specify an existing output directory for resumption
+    
+    Examples:
+        python privacyanalyzer-ai.py journal.txt
+        python privacyanalyzer-ai.py journal.txt --model mistral
+        python privacyanalyzer-ai.py journal.txt --resume-from 71 --output-dir ./pseudonymized_output
+    """
+    parser = argparse.ArgumentParser(description="Pseudonymize personal identifiers in text")
     parser.add_argument(
         "file", 
         help="Path to the text file to process"
@@ -799,6 +917,11 @@ def main():
         default=0,
         help="Resume processing from a specific chunk index (0-based)"
     )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        help="Specify an existing output directory for resumption"
+    )
     
     args = parser.parse_args()
     
@@ -809,7 +932,7 @@ def main():
             host=args.host,
             port=args.port
         )
-        pseudonymizer.process_file(args.file)
+        pseudonymizer.process_file(args.file, args.resume_from)
     except KeyboardInterrupt:
         print("\nProcess interrupted by user")
         sys.exit(1)
