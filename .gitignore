@@ -11,11 +11,6 @@ ollama_logs/
 !requirements.txt
 *.json
 *.log
-# Input
-Journal 2014 - 2:14:25.txt
-Journal first 1500.txt
-Journal first days.txt
-Journal first month.txt
 
 # Python stuff
 __pycache__/
