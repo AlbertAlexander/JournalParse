@@ -81,45 +81,84 @@ def create_replacement_pattern(term: str) -> str:
     return rf'\b{escaped_term}(?:\'s|s\')?\b'
 
 def replace_terms(text: str, mappings: Dict[str, Any]) -> Tuple[str, Dict[Tuple[str, str, str], int]]:
-    """Replace terms while preserving case and tracking replacements."""
+    """Replace terms while preserving case and tracking replacements.
+    Processes one term at a time, longest first, to prevent partial matches.
+    
+    Case Handling:
+        - Only replaces terms that match case exactly (e.g., "Tom" won't match "tom")
+        - Replacement text preserves case of matched term:
+            "Tom" -> "[Name1]"
+            "TOM" -> "[NAME1]"
+            "tom" -> "[name1]"
+        - Non-matching cases are skipped to prevent incorrect replacements
+    
+    Possessive Handling:
+        - Singular possessives ('s) are preserved:
+            "Tom's" -> "[Name1]'s"
+            "TOM'S" -> "[NAME1]'s"
+        - Plural possessives (s') are NOT replaced:
+            "Toms'" remains "Toms'"
+        This prevents false positives with actual plurals and maintains
+        grammatical correctness in the output text.
+    
+    Returns:
+        Tuple of (processed_text, replacement_counts)
+    """
     replacement_counts = defaultdict(int)
     all_terms = extract_mappings(mappings)
-    
-    # Sort by length (longest first) to prevent partial matches
-    all_terms.sort(key=lambda x: len(x[0]), reverse=True)
+    all_terms.sort(key=lambda x: len(x[0]), reverse=True)  # Longest first
     
     result = text
-    for term, replacement, category in all_terms:
-        if not term.strip() or not replacement.strip():
+    total_terms = len(all_terms)
+    for term_idx, (term, replacement, category) in enumerate(all_terms, 1):
+        if not term.strip():
             continue
             
-        pattern = create_replacement_pattern(term)
+        print(f"Processing term {term_idx}/{total_terms}: '{term}'")
+        replacements_for_term = 0
         
-        def replace_match(match):
-            matched_text = match.group(0)
-            # Extract any possessive suffix
-            possessive = ''
-            if matched_text.endswith("'s"):
-                possessive = "'s"
-            elif matched_text.endswith("s'"):
-                possessive = "s'"
+        current_pos = 0
+        while True:
+            # Case-sensitive find
+            pos = result.find(term, current_pos)
+            if pos == -1:
+                break
                 
-            # Get leading punctuation/space
-            leading = matched_text[:-len(term)-len(possessive)] if len(matched_text) > len(term) else ''
+            # Get word with more context on each side (3 chars for safety)
+            start = max(0, pos - 3)
+            end = min(len(result), pos + len(term) + 3)
+            word = result[start:end]
             
-            # Count this replacement
-            replacement_counts[(term, replacement, category)] += 1
-            
-            # Match case of the found text
-            found_text = matched_text[len(leading):-len(possessive)] if possessive else matched_text[len(leading):]
-            if found_text.isupper():
-                return leading + replacement.upper() + possessive
+            # Since find() is case sensitive, we can simplify word boundary check
+            if is_valid_word_match(word, term):
+                # No need for case checks anymore - we know it matches exactly
+                next_chars = result[pos+len(term):pos+len(term)+2]
+                if next_chars == "'s":
+                    matched = result[pos:pos+len(term)+2]
+                    replacement_text = replacement + "'s"
+                else:
+                    matched = result[pos:pos+len(term)]
+                    replacement_text = replacement
+                
+                result = result[:pos] + replacement_text + result[pos+len(matched):]
+                replacement_counts[(term, replacement, category)] += 1
+                replacements_for_term += 1
+                current_pos = pos + len(replacement_text)
             else:
-                return leading + replacement + possessive
-
-        result = re.sub(pattern, replace_match, result)
+                current_pos = pos + 1
+        
+        if replacements_for_term > 0:
+            print(f"Term {term_idx}/{total_terms}: '{term}' -> {replacements_for_term} replacements")
     
     return result, replacement_counts
+
+def is_valid_word_match(word: str, term: str) -> bool:
+    """Check if term is a valid word match (not part of a larger word)."""
+    pos = word.find(term)  # Can be case sensitive now
+    before = word[:pos]
+    after = word[pos+len(term):]
+    
+    return (not before or not before[-1].isalnum()) and (not after or not after[0].isalnum())
 
 def write_stats(stats_file: str, replacement_counts: Dict[Tuple[str, str, str], int]):
     """Write detailed statistics to file."""

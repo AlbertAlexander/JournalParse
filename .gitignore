@@ -1,7 +1,9 @@
+# Config
 config.py
+config/
 
 # Output
-test_output/
+results/
 *.jsonl
 pseudonymized_output/
 ollama_logs/
