@@ -39,7 +39,6 @@ journalparse/
 │   │   │
 │   │   └── utils/                  # Utility functions
 │   │       ├── __init__.py
-│   │       ├── chunking.py         # Text chunking for LLMs
 │   │       └── text.py             # Text processing utilities
 │   │
 │   ├── notebooks/                  # Jupyter notebooks (if needed)
