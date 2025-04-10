@@ -4,3 +4,10 @@ textblob
 vaderSentiment
 nltk
 anthropic 
+requests
+python-dateutil
+textstat
+spacy
+nltk
+vaderSentiment
+tqdm

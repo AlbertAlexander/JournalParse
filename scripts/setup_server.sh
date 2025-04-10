@@ -7,9 +7,9 @@ curl https://ollama.ai/install.sh | sh
 nvidia-smi
 
 # Pull models you want
-ollama pull mistral
 ollama pull llama3.3
-ollama pull qwen:7b
+ollama pull cogito:70b
 
-ollama run llama3.3
+#ollama run llama3.3
+ollama run cogito:70b
 systemctl --user start ollama
