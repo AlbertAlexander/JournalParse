@@ -4,7 +4,11 @@ import logging
 from .database_manager import get_db_connection
 
 def get_or_create_entity(name: str, entity_type: str) -> Optional[int]:
-    """Finds an entity by name or creates it if it doesn't exist."""
+    """Finds an entity by name or creates it if it doesn't exist. Returns entity_id."""
+    if not name or not entity_type:
+        logging.error("Invalid entity name or type")
+        return None
+        
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
@@ -13,12 +17,17 @@ def get_or_create_entity(name: str, entity_type: str) -> Optional[int]:
         if result:
             return result['entity_id']
         
-        cursor.execute("INSERT INTO entities (name, type) VALUES (?, ?)", 
+        cursor.execute("INSERT INTO entities (name, type) VALUES (?, ?)",
                       (name, entity_type))
         conn.commit()
         entity_id = cursor.lastrowid
         logging.info(f"Created entity '{name}' (Type: {entity_type}) ID: {entity_id}")
         return entity_id
+    except sqlite3.IntegrityError:
+        # Handle potential race condition if run concurrently
+        cursor.execute("SELECT entity_id FROM entities WHERE name = ?", (name,))
+        result = cursor.fetchone()
+        return result['entity_id'] if result else None
     except sqlite3.Error as e:
         logging.error(f"Error with entity '{name}': {e}")
         conn.rollback()

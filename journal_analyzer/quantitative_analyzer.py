@@ -95,8 +95,17 @@ def calculate_metrics(text: str) -> Tuple[Dict[str, Any], Dict[str, Dict[str, An
         - metrics: Dictionary of general text metrics.
         - pronoun_metrics: Dictionary of pronoun usage metrics by category.
     """
-    metrics = {}
-    pronoun_metrics = {cat: {'count': 0, 'percentage': 0.0} for cat in PRONOUN_CATEGORIES} # Default empty
+    # Initialize with default values
+    metrics = {
+        'word_count': 0,
+        'sentence_count': 0,
+        'avg_sentence_length': 0.0,
+        'reading_level_flesch': 0.0,
+        'sentiment_score_vader': 0.0,
+        'sentiment_label_vader': 'neutral'
+    }
+    
+    pronoun_metrics = {cat: {'count': 0, 'percentage': 0.0} for cat in PRONOUN_CATEGORIES}
 
     if not text or not isinstance(text, str):
         logging.warning("calculate_metrics received empty or invalid text.")
@@ -106,38 +115,40 @@ def calculate_metrics(text: str) -> Tuple[Dict[str, Any], Dict[str, Dict[str, An
         # Basic Text Stats
         metrics['word_count'] = textstat.lexicon_count(text, removepunct=True)
         metrics['sentence_count'] = textstat.sentence_count(text)
-        metrics['avg_sentence_length'] = round(textstat.avg_sentence_length(text), 2) if metrics['sentence_count'] > 0 else 0
-
-        # Readability
+        
+        if metrics['sentence_count'] > 0:
+            metrics['avg_sentence_length'] = round(textstat.avg_sentence_length(text), 2)
+        
+        # Readability - with error handling
         try:
             metrics['reading_level_flesch'] = round(textstat.flesch_reading_ease(text), 2)
         except ZeroDivisionError:
-             metrics['reading_level_flesch'] = 0.0 # Handle case with no sentences/words
+            # Already has default value
+            pass
 
-        # Sentiment (VADER)
-        sentiment_score, sentiment_label = get_sentiment_vader(text)
-        metrics['sentiment_score_vader'] = round(sentiment_score, 4)
-        metrics['sentiment_label_vader'] = sentiment_label
+        # Sentiment (VADER) - with error handling
+        try:
+            sentiment_score, sentiment_label = get_sentiment_vader(text)
+            metrics['sentiment_score_vader'] = round(sentiment_score, 4)
+            metrics['sentiment_label_vader'] = sentiment_label
+        except Exception as e:
+            logging.error(f"Error calculating sentiment: {e}")
+            # Already has default values
 
-        # Pronoun Usage (using spaCy)
+        # Pronoun Usage (using spaCy) - with error handling
         if nlp:
-            doc = nlp(text)
-            pronoun_metrics = analyze_pronoun_usage(doc)
+            try:
+                doc = nlp(text)
+                pronoun_metrics = analyze_pronoun_usage(doc)
+            except Exception as e:
+                logging.error(f"Error analyzing pronouns: {e}")
+                # Already has default values
         else:
             logging.warning("spaCy model not loaded. Skipping pronoun analysis.")
 
     except Exception as e:
         logging.error(f"Error calculating metrics: {e}", exc_info=True)
-        # Return partially filled metrics if possible, or empty ones
-        # Ensure default keys exist even if calculation failed
-        default_metrics = {
-            'word_count': 0, 'sentence_count': 0, 'avg_sentence_length': 0.0,
-            'reading_level_flesch': 0.0, 'sentiment_score_vader': 0.0,
-            'sentiment_label_vader': 'neutral'
-        }
-        for key, default_val in default_metrics.items():
-            if key not in metrics:
-                metrics[key] = default_val
+        # Default values already set
 
     return metrics, pronoun_metrics
 

@@ -12,21 +12,70 @@ from .database_manager import (
     create_tables, 
     store_emotion_analysis,
     get_db_connection,
-    insert_entry,
-    get_failed_analyses,
-    get_entry,
-    mark_resolved
+    insert_entry
 )
 from .quantitative_analyzer import calculate_metrics
 from .temporal_analyzer import analyze_time_period, analyze_full_journal, store_temporal_analysis
 from .config import JOURNAL_INPUT_FILE, DATA_DIR, DEFAULT_LLM_BACKEND, CURRENT_LLM_BACKEND, DEFAULT_LLM_MODEL
+from .pronoun_analyzer import analyze_pronouns
 
 logging.basicConfig(level=logging.INFO)
 
 def setup_database():
-    """Initialize database and required tables."""
-    create_tables()
-    logging.info("Database initialized")
+    """Initialize the database and create necessary tables."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Entries Table with all necessary fields
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS entries (
+            entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_date DATE NOT NULL,
+            content TEXT NOT NULL,
+            word_count INTEGER,
+            sentence_count INTEGER,
+            avg_sentence_length REAL,
+            reading_level_flesch REAL,
+            sentiment_score_vader REAL,
+            sentiment_label_vader TEXT,
+            year INTEGER NOT NULL,
+            quarter INTEGER NOT NULL,
+            month INTEGER NOT NULL,
+            week_of_year INTEGER NOT NULL,
+            day_of_week INTEGER NOT NULL,
+            valence_score REAL DEFAULT NULL,
+            arousal_score REAL DEFAULT NULL
+        )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_entry_date ON entries (entry_date);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_entry_year ON entries (year);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_entry_month ON entries (month);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_entry_week ON entries (week_of_year);")
+
+        # LLM Analysis Results Table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS llm_analysis_results (
+            analysis_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            question_ref TEXT,
+            time_period_start DATE,
+            time_period_end DATE,
+            prompt_summary TEXT,
+            llm_response TEXT NOT NULL,
+            model_used TEXT,
+            analysis_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_llm_question ON llm_analysis_results (question_ref);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_llm_timestamp ON llm_analysis_results (analysis_timestamp);")
+
+        conn.commit()
+        logging.info("Database tables created successfully")
+    except Exception as e:
+        logging.error(f"Error creating tables: {e}")
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 def process_single_entry(date: datetime.date, content: str, backend: str = "lambda") -> Optional[int]:
     """Process a single journal entry with all analysis methods."""
@@ -34,8 +83,11 @@ def process_single_entry(date: datetime.date, content: str, backend: str = "lamb
         # Standard library analysis
         metrics = calculate_metrics(content)
         
+        # Calculate pronoun data
+        pronoun_data = analyze_pronouns(content)  # Add this function
+        
         # Store basic entry and get entry_id
-        entry_id = insert_entry(date, content, metrics)
+        entry_id = insert_entry(date, content, metrics, pronoun_data)
         
         if not entry_id:
             raise ValueError("Failed to insert entry")
@@ -51,90 +103,82 @@ def process_single_entry(date: datetime.date, content: str, backend: str = "lamb
         logging.error(f"Error processing entry from {date}: {e}")
         return None
 
-def batch_process_entries(backend: str = "lambda"):
-    """Process all entries from the journal file."""
-    entries = split_journal_entries(JOURNAL_INPUT_FILE)
-    total = len(entries)
-    logging.info(f"Found {total} entries to process")
-    
-    processed = 0
-    failed = 0
-    
-    for date, content in entries:
-        try:
-            entry_id = process_single_entry(date, content, backend=backend)
-            if entry_id:
-                processed += 1
-            else:
-                failed += 1
+def batch_process_entries(journal_path: str = None):
+    """Process all entries in journal file."""
+    if not journal_path:
+        logging.error("No journal path provided")
+        return
+        
+    try:
+        # Parse entries from file
+        entries = split_journal_entries(journal_path)
+        if not entries:
+            logging.error("No entries found in journal")
+            return
             
-            if processed % 10 == 0:  # Progress update every 10 entries
-                logging.info(f"Processed {processed}/{total} entries")
+        # Initialize counters
+        total = len(entries)  # Define total here
+        processed = 0
+        failed = 0
+        
+        logging.info(f"Found {total} entries to process")
+        
+        # Process each entry
+        for date, content in entries:
+            try:
+                entry_id = process_single_entry(date, content)
                 
-        except Exception as e:
-            failed += 1
-            logging.error(f"Failed to process entry {date}: {e}")
-            continue
-    
-    logging.info(f"Processing complete. Successful: {processed}, Failed: {failed}")
-    return processed, failed
+                # Update counters
+                if entry_id:
+                    processed += 1
+                    # Log progress periodically
+                    if processed % 10 == 0:
+                        logging.info(f"Processed {processed}/{total} entries")
+                else:
+                    failed += 1
+                    logging.warning(f"Entry for {date} was not processed (no entry_id returned)")
+                    
+            except Exception as e:
+                failed += 1
+                logging.error(f"Failed to process entry {date}: {e}")
+        
+        # Final status
+        logging.info(f"Processing complete. Successful: {processed}, Failed: {failed}")
+        return processed, failed
+        
+    except Exception as e:
+        logging.error(f"Batch processing failed: {e}")
+        return 0, 0
 
-def run_temporal_analysis(backend: str):
-    """Run analysis across time periods and full journal."""
-    analyzer = LLMEmotionAnalyzer()
+def run_temporal_analysis(query: str):
+    """
+    Run analysis across time periods and full journal for a single query.
     
-    # Load questions from file
-    questions_file = DATA_DIR / "questions.txt"
-    with open(questions_file, 'r') as f:
-        questions = [q.strip() for q in f.readlines() if q.strip()]
+    Args:
+        query: The question to analyze
+    """
+    logging.info(f"Running temporal analysis for query: {query}")
     
     # Analyze by different time periods
     periods = ['year', 'quarter', 'month']
     for period in periods:
-        results = analyze_time_period(period, questions)
-        # Store results in llm_analysis_results table
-        store_temporal_analysis(period, results)
+        logging.info(f"Running {period} analysis...")
+        results = analyze_time_period(period, query)
+        if results:
+            # Store results in llm_analysis_results table
+            store_temporal_analysis(period, results)
+            logging.info(f"Completed {period} analysis")
+        else:
+            logging.error(f"Failed to get results for {period} analysis")
     
     # Full journal analysis
-    full_results = analyze_full_journal(questions)
-    store_temporal_analysis('full', full_results)
-
-def rerun_failed_analyses(analysis_type: str, model: str = DEFAULT_LLM_MODEL):
-    """Rerun all failed analyses of a specific type."""
-    emotion_analyzer = LLMEmotionAnalyzer(model=model)
-    failed = get_failed_analyses(analysis_type)
-    logging.info(f"Found {len(failed)} failed {analysis_type} analyses to rerun")
-    
-    for error in failed:
-        try:
-            if error['entry_id']:
-                # Entry-based analysis
-                entry = get_entry(error['entry_id'])
-                if analysis_type == 'entry_emotion':
-                    result = emotion_analyzer.analyze_emotion(
-                        error['entry_id'], 
-                        entry['content']
-                    )
-                    if result:
-                        mark_resolved(error['error_id'], resolution_notes=str(result))
-                        logging.info(f"Successfully reran analysis for entry {error['entry_id']}")
-            else:
-                # Period-based analysis
-                if analysis_type.startswith('temporal_'):
-                    result = analyze_time_period(
-                        analysis_type.split('_')[1],
-                        error['period_start'],
-                        error['period_end']
-                    )
-                    
-            if result:
-                mark_resolved(
-                    error['error_id'], 
-                    "Successfully reprocessed"
-                )
-                
-        except Exception as e:
-            logging.error(f"Rerun failed for error_id {error['error_id']}: {e}")
+    logging.info("Running full journal analysis...")
+    full_results = analyze_full_journal(query)
+    if full_results:
+        store_temporal_analysis('full', full_results)
+        logging.info("Completed full journal analysis")
+    else:
+        logging.error("Failed to get results for full journal analysis")
 
 def main():
     parser = argparse.ArgumentParser(description='Journal Analysis System')
@@ -163,7 +207,9 @@ def main():
         batch_process_entries()  # No backend parameter needed
     
     if args.analyze or args.all:
-        run_temporal_analysis()  # No backend parameter needed
+        # Prompt for query if analyze flag is set
+        query = "Analyze emotional patterns and themes in this journal"
+        run_temporal_analysis(query)
 
 if __name__ == "__main__":
     main()

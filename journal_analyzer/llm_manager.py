@@ -8,9 +8,7 @@ from pathlib import Path
 from enum import Enum
 
 from .config import (
-    DEFAULT_LLM_MODEL, 
-    MAX_API_TOKENS, 
-    CHARS_PER_TOKEN,
+    DEFAULT_LLM_MODEL,
     OLLAMA_BASE_URL,
     CURRENT_LLM_BACKEND
 )
@@ -57,10 +55,6 @@ class LLMManager:
             base_url="https://api.lambda.ai/v1"
         )
 
-    def estimate_tokens(self, text: str) -> int:
-        """Estimate number of tokens in text."""
-        return len(text) // CHARS_PER_TOKEN
-
     def query_llm(self, prompt: str, temperature: float = 0.0) -> Optional[str]:
         """
         Send a query to Lambda's LLM API and return the response.
@@ -73,10 +67,6 @@ class LLMManager:
             The LLM's response as a string, or None if error
         """
         try:
-            # Estimate tokens to check against limits
-            estimated_tokens = self.estimate_tokens(prompt)
-            if estimated_tokens > MAX_API_TOKENS:
-                raise ValueError(f"Prompt too long: {estimated_tokens} tokens (max {MAX_API_TOKENS})")
 
             # Send request to Lambda API
             response = self.client.chat.completions.create(
@@ -101,10 +91,48 @@ class LLMManager:
             return None
 
 # Simplified query function
-def query_llm(prompt: str, model: str = DEFAULT_LLM_MODEL) -> Optional[str]:
-    """Convenience function to query the LLM."""
-    manager = LLMManager(model=model)
-    return manager.query_llm(prompt)
+def query_llm(prompt: str, model: str = None, temperature: float = 0.0) -> Optional[str]:
+    """Query LLM using configured backend."""
+    
+    if CURRENT_LLM_BACKEND == 'lambda':
+        # Use Lambda API
+        api_key = os.getenv('LAMBDA_API_KEY')
+        if not api_key:
+            logging.error("LAMBDA_API_KEY not found in environment")
+            return None
+            
+        client = OpenAI(
+            api_key=api_key,
+            base_url="https://api.lambda.ai/v1"
+        )
+        
+        try:
+            response = client.chat.completions.create(
+                model=model or os.getenv('LAMBDA_MODEL', 'llama3.3-70b-instruct-fp8'),
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant analyzing journal entries."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=temperature
+            )
+            return response.choices[0].message.content
+            
+        except Exception as e:
+            logging.error(f"Lambda API error: {e}")
+            return None
+    else:
+        # Ollama API call
+        try:
+            response = requests.post('http://localhost:11434/api/generate', 
+                json={
+                    "model": model or "cogito:70b",
+                    "prompt": prompt
+                }
+            )
+            return response.json().get('response')
+        except Exception as e:
+            logging.error(f"Ollama API error: {e}")
+            return None
 
 # Example usage
 if __name__ == "__main__":

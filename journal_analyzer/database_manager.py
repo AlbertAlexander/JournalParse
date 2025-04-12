@@ -310,50 +310,9 @@ def get_quantitative_trend(metric: str, period: str, start_date: date, end_date:
     finally:
         conn.close()
 
-# --- Entity Functions (Basic - can be expanded) ---
-
-def get_or_create_entity(name: str, entity_type: str) -> Optional[int]:
-    """Finds an entity by name or creates it if it doesn't exist. Returns entity_id."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT entity_id FROM entities WHERE name = ?", (name,))
-        result = cursor.fetchone()
-        if result:
-            return result['entity_id']
-        else:
-            cursor.execute("INSERT INTO entities (name, type) VALUES (?, ?)", (name, entity_type))
-            conn.commit()
-            entity_id = cursor.lastrowid
-            logging.info(f"Created new entity '{name}' (Type: {entity_type}) with ID: {entity_id}")
-            return entity_id
-    except sqlite3.IntegrityError: # Handles potential race condition if run concurrently
-         cursor.execute("SELECT entity_id FROM entities WHERE name = ?", (name,))
-         result = cursor.fetchone()
-         return result['entity_id'] if result else None
-    except sqlite3.Error as e:
-        logging.error(f"Error getting or creating entity '{name}': {e}")
-        conn.rollback()
-        return None
-    finally:
-        conn.close()
-
-def link_entry_entity(entry_id: int, entity_id: int, snippet: Optional[str] = None):
-    """Creates a link between an entry and an entity."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("""
-        INSERT INTO entry_entities (entry_id, entity_id, context_snippet)
-        VALUES (?, ?, ?)
-        ON CONFLICT(entry_id, entity_id) DO NOTHING; -- Ignore if link already exists
-        """, (entry_id, entity_id, snippet))
-        conn.commit()
-    except sqlite3.Error as e:
-        logging.error(f"Error linking entry {entry_id} to entity {entity_id}: {e}")
-        conn.rollback()
-    finally:
-        conn.close()
+# --- Entity Functions ---
+# Note: Entity management functions have been moved to entity_manager.py
+# Use the functions from entity_manager.py instead
 
 def store_emotion_analysis(entry_id: int, analysis: Dict):
     """Store emotion analysis results."""
