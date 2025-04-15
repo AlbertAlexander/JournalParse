@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timedelta, date
 import json
 
-from .llm_manager import query_llm
+from .llm_manager import query_llm, parse_llm_json_response
 from .database_manager import get_db_connection
 from .error_manager import log_error
 
@@ -19,7 +19,15 @@ def get_entries_for_period(start_date: datetime, end_date: datetime) -> List[Dic
             WHERE entry_date BETWEEN ? AND ?
             ORDER BY entry_date
         """, (start_date, end_date))
-        return cursor.fetchall()
+        
+        columns = [description[0] for description in cursor.description]
+        entries = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        
+        if not entries:
+            logging.warning(f"No entries found for period {start_date} to {end_date}")
+            return None
+            
+        return entries
     finally:
         conn.close()
 
@@ -40,8 +48,10 @@ def analyze_time_period(period_type: str, query_or_queries, start_date: date = N
         # Get period boundaries if not specified
         if not (start_date and end_date):
             cursor = get_db_connection().cursor()
-            cursor.execute("SELECT MIN(entry_date), MAX(entry_date) FROM entries")
-            start_date, end_date = cursor.fetchone()
+            cursor.execute("SELECT MIN(entry_date) as min_date, MAX(entry_date) as max_date FROM entries")
+            columns = [description[0] for description in cursor.description]
+            date_range = dict(zip(columns, cursor.fetchone()))
+            start_date, end_date = date_range['min_date'], date_range['max_date']
         
         # Get entries for period
         entries = get_entries_for_period(start_date, end_date)
@@ -215,10 +225,9 @@ def analyze_with_context(
     include_analyses: List[str] = None,
     model: str = None
 ) -> Dict:
-    """
-    Analyze journal entries with context from previous analyses.
-    Exact string matching on query for finding/updating existing analyses.
-    """
+    """Analyze journal entries with context from previous analyses."""
+    logging.info("Starting temporal analysis")  # Add source logging
+    
     conn = get_db_connection()
     cursor = conn.cursor()
     
@@ -264,7 +273,7 @@ def analyze_with_context(
         logging.debug(f"Found {len(entries) if entries else 0} entries")  # Debug entries
         
         # Get LLM response
-        response = query_llm(prompt, model=model)
+        response = query_llm(prompt)
         logging.debug(f"LLM raw response: {response}")
         if not response:
             logging.error("Failed to get LLM response")
@@ -283,17 +292,29 @@ def analyze_with_context(
             end_date,
             prompt[:100],
             response,  # Store raw response
-            model or "default"
+            "default"
         ))
         
         conn.commit()
         
         # Try to parse as JSON if it's in JSON format, otherwise return raw
-        try:
-            return json.loads(response)
-        except json.JSONDecodeError:
-            return {"analysis": response}  # Wrap plain text in dict
+        required_fields = ['emotional_trajectory', 'recurring_patterns', 'growth_areas', 'key_triggers', 'recommendations']
+        defaults = {
+            'emotional_trajectory': 'No clear trajectory detected',
+            'recurring_patterns': [],
+            'growth_areas': [],
+            'key_triggers': [],
+            'recommendations': []
+        }
+        
+        result = parse_llm_json_response(response, required_fields, defaults)
+        
+        return result
 
+    except Exception as e:
+        logging.error(f"Error in temporal_analyzer: {e}")  # Add source to error
+        conn.rollback()
+        return None
     finally:
         conn.close()
 

@@ -19,82 +19,32 @@ from .temporal_analyzer import analyze_time_period, analyze_full_journal, store_
 from .config import JOURNAL_INPUT_FILE, DATA_DIR, DEFAULT_LLM_BACKEND, CURRENT_LLM_BACKEND, DEFAULT_LLM_MODEL
 from .pronoun_analyzer import analyze_pronouns
 
-logging.basicConfig(level=logging.INFO)
+# Set logging configuration once at the module level
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 def setup_database():
-    """Initialize the database and create necessary tables."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        # Entries Table with all necessary fields
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS entries (
-            entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry_date DATE NOT NULL,
-            content TEXT NOT NULL,
-            word_count INTEGER,
-            sentence_count INTEGER,
-            avg_sentence_length REAL,
-            reading_level_flesch REAL,
-            sentiment_score_vader REAL,
-            sentiment_label_vader TEXT,
-            year INTEGER NOT NULL,
-            quarter INTEGER NOT NULL,
-            month INTEGER NOT NULL,
-            week_of_year INTEGER NOT NULL,
-            day_of_week INTEGER NOT NULL,
-            valence_score REAL DEFAULT NULL,
-            arousal_score REAL DEFAULT NULL
-        )
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_entry_date ON entries (entry_date);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_entry_year ON entries (year);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_entry_month ON entries (month);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_entry_week ON entries (week_of_year);")
-
-        # LLM Analysis Results Table
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS llm_analysis_results (
-            analysis_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            question_ref TEXT,
-            time_period_start DATE,
-            time_period_end DATE,
-            prompt_summary TEXT,
-            llm_response TEXT NOT NULL,
-            model_used TEXT,
-            analysis_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_llm_question ON llm_analysis_results (question_ref);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_llm_timestamp ON llm_analysis_results (analysis_timestamp);")
-
-        conn.commit()
-        logging.info("Database tables created successfully")
-    except Exception as e:
-        logging.error(f"Error creating tables: {e}")
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    """Initialize the database."""
+    logging.info("Setting up database...")
+    create_tables()  # This should now show our detailed logging
 
 def process_single_entry(date: datetime.date, content: str, backend: str = "lambda") -> Optional[int]:
     """Process a single journal entry with all analysis methods."""
     try:
-        # Standard library analysis
-        metrics = calculate_metrics(content)
+        # Standard library analysis - get both metrics and pronoun_metrics
+        metrics, pronoun_metrics = calculate_metrics(content)
         
-        # Calculate pronoun data
-        pronoun_data = analyze_pronouns(content)  # Add this function
-        
-        # Store basic entry and get entry_id
-        entry_id = insert_entry(date, content, metrics, pronoun_data)
+        # Store basic entry and get entry_id using pronoun_metrics from calculate_metrics
+        entry_id = insert_entry(date, content, metrics, pronoun_metrics)
         
         if not entry_id:
             raise ValueError("Failed to insert entry")
             
-        # LLM emotion analysis
-        emotion_analyzer = LLMEmotionAnalyzer(backend=backend)
-        emotion_results = emotion_analyzer.analyze_emotion(content)
+        # LLM emotion analysis - only pass text content
+        emotion_analyzer = LLMEmotionAnalyzer()
+        emotion_results = emotion_analyzer.analyze_emotion(text=content)
         store_emotion_analysis(entry_id, emotion_results)
         
         return entry_id

@@ -1,6 +1,7 @@
 import os
 import logging
 import requests
+import json
 from typing import Optional, Dict, Literal
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -10,7 +11,8 @@ from enum import Enum
 from .config import (
     DEFAULT_LLM_MODEL,
     OLLAMA_BASE_URL,
-    CURRENT_LLM_BACKEND
+    CURRENT_LLM_BACKEND,
+    CLI_SELECTED_MODEL
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -90,9 +92,16 @@ class LLMManager:
             logging.error(f"Error querying Lambda API: {e}")
             return None
 
-# Simplified query function
-def query_llm(prompt: str, model: str = None, temperature: float = 0.0) -> Optional[str]:
-    """Query LLM using configured backend."""
+def get_active_model() -> str:
+    """Get the currently active model, preferring CLI selection over backend default."""
+    if CLI_SELECTED_MODEL:
+        return CLI_SELECTED_MODEL
+    return DEFAULT_LLM_MODEL[CURRENT_LLM_BACKEND]
+
+def query_llm(prompt: str) -> str:
+    """Query LLM using active model configuration."""
+    active_model = get_active_model()
+    logging.debug(f"Using {CURRENT_LLM_BACKEND} backend with model: {active_model}")
     
     if CURRENT_LLM_BACKEND == 'lambda':
         # Use Lambda API
@@ -108,12 +117,12 @@ def query_llm(prompt: str, model: str = None, temperature: float = 0.0) -> Optio
         
         try:
             response = client.chat.completions.create(
-                model=model or os.getenv('LAMBDA_MODEL', 'llama3.3-70b-instruct-fp8'),
+                model=active_model,
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant analyzing journal entries."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=temperature
+                temperature=0.0
             )
             return response.choices[0].message.content
             
@@ -125,7 +134,7 @@ def query_llm(prompt: str, model: str = None, temperature: float = 0.0) -> Optio
         try:
             response = requests.post('http://localhost:11434/api/generate', 
                 json={
-                    "model": model or "cogito:70b",
+                    "model": active_model,
                     "prompt": prompt
                 }
             )
@@ -133,6 +142,45 @@ def query_llm(prompt: str, model: str = None, temperature: float = 0.0) -> Optio
         except Exception as e:
             logging.error(f"Ollama API error: {e}")
             return None
+
+def parse_llm_json_response(response: str, required_fields: list = None, defaults: dict = None) -> Dict:
+    """Parse JSON from LLM response with validation and defaults.
+    
+    Args:
+        response: Raw response string from LLM
+        required_fields: List of fields that should be present in response
+        defaults: Dictionary of default values for missing fields
+        
+    Returns:
+        Parsed and validated JSON dictionary
+    """
+    try:
+        if not response:
+            raise ValueError("Empty response from LLM")
+            
+        # Extract JSON if it's embedded in other text
+        json_start = response.find('{')
+        json_end = response.rfind('}') + 1
+        
+        if json_start >= 0 and json_end > json_start:
+            json_str = response[json_start:json_end]
+            result = json.loads(json_str)
+        else:
+            raise ValueError("No JSON object found in response")
+            
+        # Validate and set defaults if specified
+        if required_fields and defaults:
+            missing_fields = [field for field in required_fields if field not in result]
+            if missing_fields:
+                logging.warning(f"Missing fields in LLM response: {missing_fields}")
+                for field in missing_fields:
+                    result[field] = defaults.get(field)
+                    
+        return result
+        
+    except Exception as e:
+        logging.error(f"Error parsing LLM response: {e}")
+        raise
 
 # Example usage
 if __name__ == "__main__":

@@ -25,137 +25,116 @@ def create_tables():
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        # Entries Table
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS entries (
-            entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry_date DATE NOT NULL,
-            content TEXT NOT NULL,
-            word_count INTEGER,
-            sentence_count INTEGER,
-            avg_sentence_length REAL,
-            reading_level_flesch REAL,
-            sentiment_score_vader REAL,
-            sentiment_label_vader TEXT,
-            year INTEGER NOT NULL,
-            quarter INTEGER NOT NULL,
-            month INTEGER NOT NULL,
-            week_of_year INTEGER NOT NULL,
-            day_of_week INTEGER NOT NULL -- 0=Monday, 6=Sunday
-        );
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_entry_date ON entries (entry_date);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_entry_year ON entries (year);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_entry_month ON entries (month);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_entry_week ON entries (week_of_year);")
-
-        # Pronoun Usage Table
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS pronoun_usage (
-            usage_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry_id INTEGER NOT NULL,
-            pronoun_category TEXT NOT NULL,
-            count INTEGER NOT NULL,
-            percentage REAL NOT NULL,
-            FOREIGN KEY (entry_id) REFERENCES entries (entry_id) ON DELETE CASCADE
-        );
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pronoun_entry_id ON pronoun_usage (entry_id);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pronoun_category ON pronoun_usage (pronoun_category);")
-
-        # Entities Table
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS entities (
-            entity_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            type TEXT NOT NULL -- 'person', 'place', 'organization', 'concept', 'self_part', 'event' etc.
-        );
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_entity_name ON entities (name);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_entity_type ON entities (type);")
+        # Log start of table creation
+        logging.info("Starting database table creation...")
         
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS analysis_errors (
-            error_id INTEGER PRIMARY KEY,
-            analysis_type TEXT NOT NULL,      -- 'entry_emotion', 'metaphor_analysis', etc.
-            entry_id INTEGER,                 -- NULL for period-based analyses
-            period_start DATE,                -- NULL for entry-based analyses
-            period_end DATE,                  -- NULL for entry-based analyses
-            error_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            error_message TEXT,
-            error_details TEXT,               -- JSON with stack trace, context, etc.
-            resolved BOOLEAN DEFAULT FALSE,
-            resolution_timestamp DATETIME,
-            resolution_notes TEXT
-        );
-        """)
-
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_analysis_errors_type ON analysis_errors(analysis_type, resolved);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_analysis_errors_entry ON analysis_errors(entry_id);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_analysis_errors_period ON analysis_errors(period_start, period_end);")
+        # Track tables to create
+        tables_to_create = [
+            ("entries", """
+            CREATE TABLE IF NOT EXISTS entries (
+                entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_date DATE NOT NULL,
+                content TEXT NOT NULL,
+                word_count INTEGER,
+                sentence_count INTEGER,
+                avg_sentence_length REAL,
+                reading_level_flesch REAL,
+                sentiment_score_vader REAL,
+                sentiment_label_vader TEXT,
+                year INTEGER NOT NULL,
+                quarter INTEGER NOT NULL,
+                month INTEGER NOT NULL,
+                week_of_year INTEGER NOT NULL,
+                day_of_week INTEGER NOT NULL,
+                valence_score REAL,
+                arousal_score REAL
+            );"""),
+            
+            ("pronoun_usage", """
+            CREATE TABLE IF NOT EXISTS pronoun_usage (
+                usage_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id INTEGER NOT NULL,
+                pronoun_category TEXT NOT NULL,
+                count INTEGER NOT NULL,
+                percentage REAL NOT NULL,
+                FOREIGN KEY (entry_id) REFERENCES entries (entry_id) ON DELETE CASCADE
+            );"""),
+            
+            ("entities", """
+            CREATE TABLE IF NOT EXISTS entities (
+                entity_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                type TEXT NOT NULL
+            );"""),
+            
+            ("entry_entities", """
+            CREATE TABLE IF NOT EXISTS entry_entities (
+                entry_entity_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id INTEGER NOT NULL,
+                entity_id INTEGER NOT NULL,
+                context_snippet TEXT,
+                FOREIGN KEY (entry_id) REFERENCES entries (entry_id) ON DELETE CASCADE,
+                FOREIGN KEY (entity_id) REFERENCES entities (entity_id) ON DELETE CASCADE,
+                UNIQUE(entry_id, entity_id)
+            );"""),
+            
+            ("emotion_analysis", """
+            CREATE TABLE IF NOT EXISTS emotion_analysis (
+                analysis_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id INTEGER NOT NULL,
+                primary_emotions TEXT NOT NULL,  -- JSON array of emotions
+                emotional_patterns TEXT,
+                analysis_confidence REAL,
+                llm_reasoning TEXT,
+                FOREIGN KEY (entry_id) REFERENCES entries (entry_id) ON DELETE CASCADE
+            );"""),
+            
+            ("llm_analysis_results", """
+            CREATE TABLE IF NOT EXISTS llm_analysis_results (
+                analysis_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                question_ref TEXT,
+                time_period_start DATE,
+                time_period_end DATE,
+                prompt_summary TEXT,
+                llm_response TEXT NOT NULL,
+                model_used TEXT,
+                analysis_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            );""")
+        ]
         
-        # Entry Entities Table (Many-to-Many)
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS entry_entities (
-            entry_entity_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry_id INTEGER NOT NULL,
-            entity_id INTEGER NOT NULL,
-            context_snippet TEXT,
-            FOREIGN KEY (entry_id) REFERENCES entries (entry_id) ON DELETE CASCADE,
-            FOREIGN KEY (entity_id) REFERENCES entities (entity_id) ON DELETE CASCADE,
-            UNIQUE(entry_id, entity_id) -- Prevent duplicate links for the same entry/entity
-        );
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ee_entry_id ON entry_entities (entry_id);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ee_entity_id ON entry_entities (entity_id);")
-
-        # LLM Analysis Results Table
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS llm_analysis_results (
-            analysis_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            question_ref TEXT, -- Reference to the question asked
-            time_period_start DATE,
-            time_period_end DATE,
-            prompt_summary TEXT, -- Short description or hash of the prompt
-            llm_response TEXT NOT NULL,
-            model_used TEXT,
-            analysis_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_llm_question ON llm_analysis_results (question_ref);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_llm_timestamp ON llm_analysis_results (analysis_timestamp);")
-
-        # Add valence and arousal columns to entries table
-        cursor.execute("""
-        ALTER TABLE entries 
-        ADD COLUMN valence_score REAL DEFAULT NULL;
-        """)
-        cursor.execute("""
-        ALTER TABLE entries 
-        ADD COLUMN arousal_score REAL DEFAULT NULL;
-        """)
-
-        # Emotion Analysis Table (for detailed LLM analysis)
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS emotion_analysis (
-            analysis_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry_id INTEGER NOT NULL,
-            primary_emotions TEXT,  -- JSON array
-            emotional_patterns TEXT,
-            analysis_confidence REAL NOT NULL,
-            llm_reasoning TEXT,
-            analysis_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (entry_id) REFERENCES entries (entry_id) ON DELETE CASCADE
-        );
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_emotion_analysis_entry_id ON emotion_analysis (entry_id);")
-
+        # Create each table and log the process
+        for table_name, create_sql in tables_to_create:
+            logging.info(f"Creating table: {table_name}")
+            try:
+                cursor.execute(create_sql)
+                logging.info(f"Successfully created table: {table_name}")
+            except sqlite3.Error as e:
+                logging.error(f"Error creating {table_name} table: {e}")
+                raise
+        
+        # Verify tables were created
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        existing_tables = [t[0] for t in cursor.fetchall()]
+        logging.info(f"Tables in database after creation: {existing_tables}")
+        
+        # Check for missing tables
+        expected_tables = {t[0] for t in tables_to_create}
+        missing_tables = expected_tables - set(existing_tables)
+        if missing_tables:
+            logging.error(f"Failed to create tables: {missing_tables}")
+            raise Exception(f"Missing tables after creation: {missing_tables}")
+            
         conn.commit()
-        logging.info("Database tables created or verified successfully.")
-        logging.info("Emotion analysis tables and columns created successfully.")
+        logging.info("All database tables created and committed successfully")
+        
     except sqlite3.Error as e:
-        logging.error(f"Error creating tables: {e}")
+        logging.error(f"SQLite error during table creation: {str(e)}")
         conn.rollback()
+        raise
+    except Exception as e:
+        logging.error(f"Unexpected error during table creation: {str(e)}")
+        conn.rollback()
+        raise
     finally:
         conn.close()
 

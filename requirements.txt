@@ -12,3 +12,5 @@ spacy
 nltk
 vaderSentiment
 tqdm
+matplotlib
+pandas

@@ -1,11 +1,12 @@
 from journal_analyzer.main import setup_database, batch_process_entries
 from journal_analyzer.temporal_analyzer import analyze_with_context
 from journal_analyzer.database_manager import create_tables, get_db_connection
-from journal_analyzer.config import CURRENT_LLM_BACKEND, DEFAULT_LLM_BACKEND
+from journal_analyzer.config import CURRENT_LLM_BACKEND, DEFAULT_LLM_BACKEND, DEFAULT_LLM_MODEL, CLI_SELECTED_MODEL
 from pathlib import Path
 import argparse
 import os
 from dotenv import load_dotenv
+import logging
 
 def print_db_contents(table_name: str = None):
     """
@@ -55,10 +56,16 @@ def analyze_journal(journal_path: str = None, query: str = None):
     """
     load_dotenv()
     
+    # Declare global before any use
+    global CLI_SELECTED_MODEL
+    
+    # Now we can reset it
+    CLI_SELECTED_MODEL = None
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--backend', choices=['lambda', 'ollama'], 
                        default=DEFAULT_LLM_BACKEND)
-    parser.add_argument('--model', help='Override default model name')
+    parser.add_argument('--model', type=str, help='LLM model to use (overrides default)')
     parser.add_argument('--journal', type=str,
                        help='Path to journal text file')
     parser.add_argument('--query', type=str,
@@ -89,11 +96,12 @@ def analyze_journal(journal_path: str = None, query: str = None):
     global CURRENT_LLM_BACKEND
     CURRENT_LLM_BACKEND = args.backend
     
-    # Set default Lambda model if not specified
+    # Update CLI model selection if specified
     if args.model:
-        os.environ['LAMBDA_MODEL'] = args.model
-    elif args.backend == 'lambda':
-        os.environ['LAMBDA_MODEL'] = 'llama3.3-70b-instruct-fp8'  # Default Lambda model
+        CLI_SELECTED_MODEL = args.model
+        logging.info(f"Using CLI-specified model: {CLI_SELECTED_MODEL}")
+    else:
+        logging.info(f"Using default model: {DEFAULT_LLM_MODEL}")
 
     # Setup and load journal if needed
     setup_database()

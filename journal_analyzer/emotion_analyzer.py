@@ -1,33 +1,33 @@
 from typing import Dict, Optional
 import json
 import logging
-from .llm_manager import query_llm  # Assuming you have this set up
+from .llm_manager import query_llm, parse_llm_json_response
 from .config import DEFAULT_LLM_MODEL
 from .error_manager import log_error
 
 class LLMEmotionAnalyzer:
-    def __init__(self, model: str = DEFAULT_LLM_MODEL):
-        self.model = model
-        
-    def analyze_emotion(self, entry_id: int, text: str) -> Dict[str, float]:
+    def analyze_emotion(self, text: str) -> Dict[str, float]:
         """Analyze emotional content using LLM."""
+        logging.info("Starting emotion analysis for entry")
         
         prompt = f"""You are an expert at analyzing emotional content in journal entries.
-        Analyze the emotional content of this journal entry. Consider the full context,
+        Analyze the emotional state of the writer of this journal entry. Consider the full context,
         subtext, and nuanced emotional expressions.
 
         Provide two scores:
         1. Valence (positivity-negativity) on a 0-10 scale where:
-           - 0 = extremely negative
+           - 0 = extremely negative (even if brief)
            - 5 = neutral
-           - 10 = extremely positive
+           - 10 = extremely positive (even if brief)
 
         2. Arousal (emotional intensity/energy) on a 0-10 scale where:
            - 0 = completely calm/flat
            - 5 = moderate emotional energy
            - 10 = extremely high emotional intensity
 
-        Also identify the primary emotions present and any emotional patterns.
+        Also identify the primary emotions present and any emotional patterns. 
+        Statements which do not contain emotional content or imply an emotional state will not affect the scores. 
+        Scores reflect the state of the writer, not overall text.
 
         Journal text:
         {text}
@@ -44,81 +44,27 @@ class LLMEmotionAnalyzer:
         """
 
         try:
-            response = query_llm(prompt, self.model)
-            if not response:
-                raise ValueError("No response from LLM")
+            response = query_llm(prompt)
             
-            # Defensive JSON parsing
-            try:
-                # Extract JSON if it's embedded in other text
-                json_start = response.find('{')
-                json_end = response.rfind('}') + 1
-                
-                if json_start >= 0 and json_end > json_start:
-                    json_str = response[json_start:json_end]
-                    result = json.loads(json_str)
-                else:
-                    raise ValueError("No JSON object found in response")
-                
-                # Validate required fields
-                required_fields = ['valence', 'arousal', 'primary_emotions', 'emotional_patterns', 'confidence']
-                missing_fields = [field for field in required_fields if field not in result]
-                
-                if missing_fields:
-                    logging.warning(f"Missing fields in emotion analysis: {missing_fields}")
-                    # Add default values for missing fields
-                    defaults = {
-                        'valence': 5.0,
-                        'arousal': 5.0,
-                        'primary_emotions': ['neutral'],
-                        'emotional_patterns': 'No patterns detected',
-                        'confidence': 0.5,
-                        'reasoning': 'Incomplete analysis'
-                    }
-                    for field in missing_fields:
-                        result[field] = defaults[field]
-                
-                # Validate and fix data types
-                if not isinstance(result.get('primary_emotions', []), list):
-                    result['primary_emotions'] = [str(result.get('primary_emotions', 'neutral'))]
-                
-                # Ensure primary_emotions is a list of strings
-                result['primary_emotions'] = [str(emotion) for emotion in result.get('primary_emotions', [])]
-                
-                # Validate scores are in range
-                result['valence'] = max(0, min(10, float(result.get('valence', 5.0))))
-                result['arousal'] = max(0, min(10, float(result.get('arousal', 5.0))))
-                result['confidence'] = max(0, min(1, float(result.get('confidence', 0.5))))
-                
-                # Ensure other fields are strings
-                result['emotional_patterns'] = str(result.get('emotional_patterns', 'No patterns detected'))
-                result['reasoning'] = str(result.get('reasoning', 'No reasoning provided'))
-                
-                return result
-                
-            except json.JSONDecodeError as e:
-                logging.error(f"JSON parsing error in emotion analysis: {e}")
-                # Return a default result
-                return {
-                    'valence': 5.0,
-                    'arousal': 5.0,
-                    'primary_emotions': ['neutral'],
-                    'emotional_patterns': 'Error parsing LLM response',
-                    'confidence': 0.0,
-                    'reasoning': f"JSON parsing error: {str(e)}"
-                }
-                
+            required_fields = ['valence', 'arousal', 'primary_emotions', 'emotional_patterns', 'confidence']
+            defaults = {
+                'valence': 5.0,
+                'arousal': 5.0,
+                'primary_emotions': ['neutral'],
+                'emotional_patterns': 'No patterns detected',
+                'confidence': 0.5,
+                'reasoning': 'Incomplete analysis'
+            }
+            
+            return parse_llm_json_response(response, required_fields, defaults)
+            
         except Exception as e:
-            log_error(
-                analysis_type='entry_emotion',
-                error=e,
-                entry_id=entry_id,
-                context={'text_length': len(text)}
-            )
+            logging.error(f"Error in emotion_analyzer: {e}")
             return None
 
     def analyze_emotional_development(self, entries: list[str]) -> Dict:
         """Analyze emotional patterns across multiple entries."""
+        logging.info("Starting emotional development analysis")
         
         entries_text = "\n---\n".join(entries)
         
@@ -144,10 +90,23 @@ class LLMEmotionAnalyzer:
         """
 
         try:
-            return json.loads(query_llm(prompt, self.model))
+            response = query_llm(prompt)
+            
+            required_fields = ['emotional_trajectory', 'recurring_patterns', 'growth_areas', 
+                             'key_triggers', 'recommendations']
+            defaults = {
+                'emotional_trajectory': 'No clear trajectory detected',
+                'recurring_patterns': [],
+                'growth_areas': [],
+                'key_triggers': [],
+                'recommendations': []
+            }
+            
+            return parse_llm_json_response(response, required_fields, defaults)
+            
         except Exception as e:
             logging.error(f"Error in emotional development analysis: {e}")
-            return {"error": str(e)}
+            return None
 
 # Example usage:
 if __name__ == "__main__":
@@ -159,6 +118,6 @@ if __name__ == "__main__":
     less and love more. I'd expand that statement now to say, "Let your philosophy 
     and identity grow out of your choices. You can love Andrea in your way."""
     
-    result = analyzer.analyze_emotion(1, sample_text)
+    result = analyzer.analyze_emotion(sample_text)
     if result:
         print(json.dumps(result, indent=2)) 
